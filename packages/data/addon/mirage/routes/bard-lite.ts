@@ -17,7 +17,7 @@ import {
   parseHavings,
   parseMetrics,
 } from './bard-lite-parsers';
-import { getPeriodForGrain } from 'navi-data/utils/date';
+import { getPeriodForGrain, DateTimePeriods } from 'navi-data/utils/date';
 import { groupBy, difference } from 'lodash-es';
 import { GrainWithAll } from 'navi-data/serializers/metadata/bard';
 
@@ -71,28 +71,70 @@ const global = window as Window &
  * @returns list of moments in requested time range
  */
 function _getDates(grain: GrainWithAll, start: string, end: string) {
-  const isoGrain = grain === 'week' ? 'isoWeek' : grain; // need to use isoweek, which is what real ws uses
-  let endDate;
-  const nonAllGrain = isoGrain === 'all' ? 'day' : isoGrain;
+  const ERROR_MSG_ZERO_LENGTH_INTERVAL = `Date time cannot have zero length interval. ${start}/${end}.`;
 
-  const current = moment().startOf(nonAllGrain);
-  const next = current.clone().add(1, getPeriodForGrain(nonAllGrain));
-  if (end === 'current') {
+  if (start === end) {
+    throw new Error(ERROR_MSG_ZERO_LENGTH_INTERVAL);
+  }
+
+  let startDate, endDate;
+  let allStartCurrent, allEndCurrentOrNext;
+  let nonAllGrain;
+
+  if (grain === 'all') {
+    let validInterval = true;
+
+    let r = end.match(/^(?<currentOrNext>(current|next))(?<grain>[a-z]+)$/i)?.groups;
+    allEndCurrentOrNext = r?.currentOrNext;
+    nonAllGrain = r?.grain?.toLowerCase() ?? 'day';
+    if (!DateTimePeriods.includes(nonAllGrain)) {
+      validInterval = false;
+    }
+
+    r = start.match(/^(?<current>(current))(?<grain>[a-z]+)$/i)?.groups;
+    allStartCurrent = r?.current;
+    const startGrain = r?.grain?.toLowerCase();
+    if (startGrain && !DateTimePeriods.includes(startGrain)) {
+      validInterval = false;
+    }
+
+    if (!validInterval) {
+      throw new Error(`Invalid interval for 'all' grain. ${start}/${end}.`);
+    }
+  } else {
+    nonAllGrain = grain;
+  }
+
+  const nonAllIsoGrain = nonAllGrain === 'week' ? 'isoWeek' : nonAllGrain; // need to use isoweek, which is what real ws uses
+
+  const current = moment().startOf(nonAllIsoGrain);
+  const next = current.clone().add(1, getPeriodForGrain(nonAllIsoGrain));
+  if ([end, allEndCurrentOrNext].includes('current')) {
     endDate = current;
-  } else if (end === 'next') {
+  } else if ([end, allEndCurrentOrNext].includes('next')) {
     endDate = next;
   } else {
     endDate = moment.min(moment(end, API_DATE_FORMAT), next);
   }
-  let startDate = start.startsWith('P')
+  if ([start, allStartCurrent].includes('current')) {
+    startDate = current;
+  } else {
+    startDate = start.startsWith('P')
       ? endDate.clone().subtract(moment.duration(start))
-      : moment(start, API_DATE_FORMAT),
-    currentDate = moment.max(startDate, moment.utc(DATA_EPOCH)),
+      : moment(start, API_DATE_FORMAT);
+  }
+
+  let currentDate = moment.max(startDate, moment.utc(DATA_EPOCH)),
     dates = [];
+
+  if (currentDate.isSame(endDate)) {
+    throw new Error(ERROR_MSG_ZERO_LENGTH_INTERVAL);
+  }
 
   // handle "all" time grain
   if (grain === 'all') {
-    return [moment(startDate, API_DATE_FORMAT)];
+    console.log(moment(currentDate, API_DATE_FORMAT).format('YYYY-MM-DD'));
+    return [moment(currentDate, API_DATE_FORMAT)];
   }
 
   while (currentDate.isBefore(endDate)) {
@@ -198,24 +240,18 @@ export default function (
 
     // Get date range from query params + grain
     const [start, end] = request.queryParams.dateTime.split('/');
-    if (start === end) {
+    let dates;
+    try {
+      dates = _getDates(grain, start, end);
+    } catch (e) {
       return new Response(
         400,
         {},
         {
-          description: `Date time cannot have zero length intervals. ${start}/${end}.`,
-        }
-      );
-    } else if (grain === 'all' && !(moment(start).isValid() && moment(end).isValid())) {
-      return new Response(
-        400,
-        {},
-        {
-          description: `Invalid interval for 'all' grain.`,
+          description: e.message,
         }
       );
     }
-    let dates = _getDates(grain, start, end);
     let filters: FiliFilter[] = [];
     if (request.queryParams.filters) {
       filters = parseFilters(request.queryParams.filters);
